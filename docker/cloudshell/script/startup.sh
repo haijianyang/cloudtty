@@ -11,6 +11,7 @@ COMMAND=${4:-"bash"}
 POD_NAME=${5:-}
 POD_NAMESPACE=${6:-"default"}
 CONTAINER=${7:-}
+PS1=${8:-}
 
 if [ -d /root -a "`ls /root`" != "" ]; then         
   rm -rf /root/*                                    
@@ -19,6 +20,7 @@ fi
 ## Generate config to the path `/root/.kube/config`.
 if [[ -n "${KUBECONFIG}"  ]]; then
   echo "${KUBECONFIG}" > /root/.kube/config
+  chmod 600 /root/.kube/config # By default, it will warn: Kubernetes configuration file is group-readable. This is insecure. Location: /root/.kube/config
 fi
 
 echo "export POD_NAMESPACE='${POD_NAMESPACE}'" > /root/.env
@@ -29,6 +31,10 @@ fi
 
 if [[ -n "${CONTAINER}" ]]; then
   echo "export CONTAINER='${CONTAINER}'" >> /root/.env
+fi
+
+if [[ -n "${PS1}" ]]; then
+  echo "export PS1='${PS1}'" >> /root/.env
 fi
 
 source /root/.bashrc

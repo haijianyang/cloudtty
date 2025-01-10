@@ -15,6 +15,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/util/rand"
 	informercorev1 "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -29,6 +30,8 @@ import (
 
 	cloudshellv1alpha1 "github.com/cloudtty/cloudtty/pkg/apis/cloudshell/v1alpha1"
 	"github.com/cloudtty/cloudtty/pkg/constants"
+	cloudshellinformers "github.com/cloudtty/cloudtty/pkg/generated/informers/externalversions/cloudshell/v1alpha1"
+	cloudshellisters "github.com/cloudtty/cloudtty/pkg/generated/listers/cloudshell/v1alpha1"
 	"github.com/cloudtty/cloudtty/pkg/manifests"
 	util "github.com/cloudtty/cloudtty/pkg/utils"
 	"github.com/cloudtty/cloudtty/pkg/utils/gclient"
@@ -36,7 +39,8 @@ import (
 
 var (
 	// DefaultScaleInWorkerQueueDuration define the duration to scale in the workers.
-	DefaultScaleInWorkerQueueDuration = time.Hour * 3
+	// https://github.com/cloudtty/cloudtty/issues/484
+	DefaultScaleInWorkerQueueDuration = time.Minute * 30
 	ScaleInQueueThreshold             = 0.75
 	ControllerFinalizer               = "cloudshell.cloudtty.io/worker-pool"
 	ErrNotWorker                      = errors.New("There is no worker in pool")
@@ -55,9 +59,10 @@ type WorkerPool struct {
 
 	scaleInQueueDuration time.Duration
 
-	queue       workqueue.RateLimitingInterface
-	podInformer cache.SharedIndexInformer
-	podLister   listerscorev1.PodLister
+	queue            workqueue.RateLimitingInterface
+	podInformer      cache.SharedIndexInformer
+	podLister        listerscorev1.PodLister
+	cloudShellLister cloudshellisters.CloudShellLister
 }
 
 // Request represents a request to borrow a worker from worker pool. if the delay is true,
@@ -70,7 +75,8 @@ type Request struct {
 	CloudShellQueue workqueue.RateLimitingInterface
 }
 
-func New(client client.Client, coreWorkerLimit, maxWorkerLimit int, podInformer informercorev1.PodInformer) *WorkerPool {
+func New(client client.Client, coreWorkerLimit, maxWorkerLimit int,
+	podInformer informercorev1.PodInformer, cloudshellInformer cloudshellinformers.CloudShellInformer) *WorkerPool {
 	workerPool := &WorkerPool{
 		Client:               client,
 		workerQueue:          newQueue(),
@@ -84,8 +90,9 @@ func New(client client.Client, coreWorkerLimit, maxWorkerLimit int, podInformer 
 		queue: workqueue.NewRateLimitingQueue(
 			workqueue.NewItemExponentialFailureRateLimiter(2*time.Second, 5*time.Second),
 		),
-		podInformer: podInformer.Informer(),
-		podLister:   podInformer.Lister(),
+		podInformer:      podInformer.Informer(),
+		podLister:        podInformer.Lister(),
+		cloudShellLister: cloudshellInformer.Lister(),
 	}
 
 	if _, err := podInformer.Informer().AddEventHandler(
@@ -293,7 +300,38 @@ func (w *WorkerPool) tryScaleInWorkerQueue(stop <-chan struct{}) {
 }
 
 func (w *WorkerPool) scaleInWorkerQueue() {
-	workers, err := w.podLister.List(labels.Set{constants.WorkerOwnerLabelKey: ""}.AsSelector())
+	// https://github.com/cloudtty/cloudtty/issues/483
+	req, _ := labels.NewRequirement(constants.WorkerOwnerLabelKey, selection.NotIn, []string{""})
+	selector := labels.NewSelector().Add(*req)
+	workers, err := w.podLister.List(selector)
+	if err != nil {
+		klog.ErrorS(err, "failed to list pod from informer cache")
+		return
+	}
+	for i := 0; i < len(workers); i++ {
+		worker := workers[i]
+		if worker.Labels == nil || worker.Labels[constants.WorkerOwnerLabelKey] == "" {
+			continue
+		}
+
+		_, err := w.cloudShellLister.CloudShells(worker.Namespace).Get(worker.Labels[constants.WorkerOwnerLabelKey])
+		if err != nil {
+			if !apierrors.IsNotFound(err) {
+				klog.ErrorS(err, fmt.Sprintf("failed to get cloudshell %s for worker %s", worker.Labels[constants.WorkerOwnerLabelKey], worker.Name))
+				continue
+			}
+
+			klog.Infof("found worker %s owner cloudshell %s does not exist, so remove owner", worker.Name, worker.Labels[constants.WorkerOwnerLabelKey])
+
+			pod := worker.DeepCopy()
+			pod.Labels[constants.WorkerOwnerLabelKey] = ""
+			if err := w.Update(context.TODO(), pod); err != nil {
+				klog.ErrorS(err, "failed to remove owner for worker "+worker.Name)
+			}
+		}
+	}
+
+	workers, err = w.podLister.List(labels.Set{constants.WorkerOwnerLabelKey: ""}.AsSelector())
 	if err != nil {
 		klog.ErrorS(err, "error when listing pod from informer cache")
 	}
@@ -429,7 +467,7 @@ func (w *WorkerPool) matchRequestFor(worker *corev1.Pod) *Request {
 	return nil
 }
 
-func (w *WorkerPool) Back(worker *corev1.Pod) error {
+func (w *WorkerPool) Back(worker *corev1.Pod, toDelete bool) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		newer, err := w.podLister.Pods(worker.Namespace).Get(worker.Name)
 		if err != nil {
@@ -437,6 +475,10 @@ func (w *WorkerPool) Back(worker *corev1.Pod) error {
 				return nil
 			}
 			return err
+		}
+
+		if toDelete {
+			return w.deleteWorker(newer)
 		}
 
 		// if the worker is not ready, we delete it directly.

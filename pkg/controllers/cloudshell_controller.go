@@ -105,7 +105,13 @@ func New(client client.Client, config *rest.Config, wp *worerkpool.WorkerPool, c
 			UpdateFunc: func(oldObj, newObj interface{}) {
 				older := oldObj.(*cloudshellv1alpha1.CloudShell)
 				newer := newObj.(*cloudshellv1alpha1.CloudShell)
-				if !reflect.DeepEqual(older.Spec, newer.Spec) || !newer.DeletionTimestamp.IsZero() {
+				// TTLSecondsAfterStarted not need to trigger reconcile to avoid resetting the pod environment.
+				// https://github.com/cloudtty/cloudtty/issues/535
+				olderSpec := older.Spec
+				olderSpec.TTLSecondsAfterStarted = nil
+				newerSpec := newer.Spec
+				newerSpec.TTLSecondsAfterStarted = nil
+				if !reflect.DeepEqual(olderSpec, newerSpec) || !newer.DeletionTimestamp.IsZero() {
 					controller.enqueue(newObj)
 				}
 			},
@@ -262,7 +268,8 @@ func (c *Controller) syncCloudShell(ctx context.Context, cloudshell *cloudshellv
 			return nil, err
 		}
 
-		cloudshell.SetLabels(map[string]string{constants.CloudshellPodLabelKey: worker.Name})
+		// https://github.com/cloudtty/cloudtty/pull/481
+		AddLabel(cloudshell, constants.CloudshellPodLabelKey, worker.Name)
 		if err := c.Update(context.TODO(), cloudshell); err != nil {
 			return nil, err
 		}
@@ -346,7 +353,11 @@ func (c *Controller) StartupWorkerFor(ctx context.Context, cloudshell *cloudshel
 			return err
 		}
 
-		kubeConfigByte = secret.Data["config"]
+		configDataName := os.Getenv("KUBECONFIG_SECRET_DATA_NAME")
+		if configDataName == "" {
+			configDataName = "config"
+		}
+		kubeConfigByte = secret.Data[configDataName]
 	}
 
 	return c.StartupWorker(ctx, cloudshell, kubeConfigByte)
@@ -354,7 +365,7 @@ func (c *Controller) StartupWorkerFor(ctx context.Context, cloudshell *cloudshel
 
 func (c *Controller) StartupWorker(_ context.Context, cloudshell *cloudshellv1alpha1.CloudShell, kubeConfigByte []byte) error {
 	// TODO: Some extra logic in order to upload and download files.
-	var podName, namespace, container string
+	var podName, namespace, container, ps1 string
 	for _, env := range cloudshell.Spec.Env {
 		switch env.Name {
 		case "POD_NAME":
@@ -363,6 +374,8 @@ func (c *Controller) StartupWorker(_ context.Context, cloudshell *cloudshellv1al
 			namespace = env.Value
 		case "CONTAINER":
 			container = env.Value
+		case "PS1":
+			ps1 = env.Value
 		}
 	}
 
@@ -371,7 +384,7 @@ func (c *Controller) StartupWorker(_ context.Context, cloudshell *cloudshellv1al
 	ttydCommand := []string{
 		startupScriptPath,
 		string(kubeConfigByte), fmt.Sprint(cloudshell.Spec.Once), fmt.Sprint(cloudshell.Spec.UrlArg),
-		cloudshell.Spec.CommandAction, podName, namespace, container,
+		cloudshell.Spec.CommandAction, podName, namespace, container, ps1,
 	}
 	return execCommand(cloudshell, ttydCommand, c.config)
 }
@@ -728,10 +741,19 @@ func (c *Controller) removeCloudshell(ctx context.Context, cloudshell *cloudshel
 	}
 
 	if worker != nil {
-		if err = c.ResetWorker(ctx, cloudshell); err != nil {
-			klog.ErrorS(err, "failed reset worker")
+		toDelete := false
+		// https://github.com/cloudtty/cloudtty/issues/482
+		if cloudshell.Annotations != nil &&
+			cloudshell.Annotations[constants.DeleteWorkerOnDeletionAnnotation] == "true" {
+			toDelete = true
+			klog.Infof("cloudshell %s has %s, so delete worker %s", cloudshell.Name, constants.DeleteWorkerOnDeletionAnnotation, worker.Name)
+		} else {
+			if err = c.ResetWorker(ctx, cloudshell); err != nil {
+				klog.ErrorS(err, "failed reset worker")
+			}
 		}
-		if err := c.workerPool.Back(worker); err != nil {
+
+		if err := c.workerPool.Back(worker, toDelete); err != nil {
 			return err
 		}
 

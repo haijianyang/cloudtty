@@ -16,3 +16,10 @@ const (
 
 	PodTemplatePath = "/etc/cloudtty/pod-temp.yaml"
 )
+
+const (
+	// DeleteWorkerOnDeletionAnnotation is the annotation identifying when cloudshell is deleted,
+	// its associated worker will also be deleted. By default, worker will not be deleted,
+	// and back to the worker pool.
+	DeleteWorkerOnDeletionAnnotation = "cloudshell.cloudtty.io/delete-worker-on-deletion"
+)

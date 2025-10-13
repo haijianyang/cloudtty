@@ -115,6 +115,8 @@ func New(client client.Client, kubeClient kubernetes.Interface, config *rest.Con
 	_, err := cloudshellInformer.Informer().AddEventHandler(
 		cache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj interface{}) {
+				shell := obj.(*cloudshellv1alpha1.CloudShell)
+				klog.InfoS("AddFunc**************", "obj", shell.Name)
 				controller.enqueue(obj)
 			},
 			UpdateFunc: func(oldObj, newObj interface{}) {
@@ -127,6 +129,7 @@ func New(client client.Client, kubeClient kubernetes.Interface, config *rest.Con
 				newerSpec := newer.Spec
 				newerSpec.TTLSecondsAfterStarted = nil
 				if !reflect.DeepEqual(olderSpec, newerSpec) || !newer.DeletionTimestamp.IsZero() {
+					klog.InfoS("UpdateFunc**************", "obj", older.Name)
 					controller.enqueue(newObj)
 				}
 			},

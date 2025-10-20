@@ -51,14 +51,16 @@ type Options struct {
 	LeaderElection   componentbaseconfig.LeaderElectionConfiguration
 	ClientConnection componentbaseconfig.ClientConnectionConfiguration
 
-	Master          string
-	Kubeconfig      string
-	CoreWorkerLimit int
-	MaxWorkerLimit  int
-	ClouShellImage  string
-	NodeSelector    map[string]string
-	Resources       cloudshellv1alpha1.ResourceSetting
-	Logs            *logs.Options
+	Master                string
+	Kubeconfig            string
+	cloudShellConcurrency int
+	CoreWorkerLimit       int
+	MaxWorkerLimit        int
+	ClouShellImage        string
+	NodeSelector          map[string]string
+	Resources             cloudshellv1alpha1.ResourceSetting
+	Logs                  *logs.Options
+	IgnoreSpecUpdate      bool
 }
 
 func NewOptions() (*Options, error) {
@@ -97,11 +99,13 @@ func (o *Options) Flags() cliflag.NamedFlagSets {
 	genericfs.StringVar(&o.ClientConnection.ContentType, "kube-api-content-type", o.ClientConnection.ContentType, "Content type of requests sent to apiserver.")
 	genericfs.Float32Var(&o.ClientConnection.QPS, "kube-api-qps", o.ClientConnection.QPS, "QPS to use while talking with kubernetes apiserver.")
 	genericfs.Int32Var(&o.ClientConnection.Burst, "kube-api-burst", o.ClientConnection.Burst, "Burst to use while talking with kubernetes apiserver.")
+	genericfs.IntVar(&o.cloudShellConcurrency, "cloudshell-concurrency", 1, "Number of CloudShell to reconcile simultaneously.")
 	genericfs.IntVar(&o.CoreWorkerLimit, "core-worker-limit", 5, "The core limit of worker pool.")
 	genericfs.IntVar(&o.MaxWorkerLimit, "max-worker-limit", 10, "The max limit of worker pool.")
 	genericfs.StringVar(&o.ClouShellImage, "cloudshell-image", "", "The cloudshell image.")
 	genericfs.StringToStringVar(&o.NodeSelector, "cloudshell-node-selector", o.NodeSelector, "The cloudshell node selector.")
 	genericfs.Var(&o.Resources, "cloudshell-resources", "The cloudshell resources.")
+	genericfs.BoolVar(&o.IgnoreSpecUpdate, "cloudshell-ignore-spec-update", false, "Ignore CloudShell spec updates after startup.")
 
 	fs := nfs.FlagSet("misc")
 	fs.StringVar(&o.Master, "master", o.Master, "The address of the Kubernetes API server (overrides any value in kubeconfig).")
@@ -157,16 +161,18 @@ func (o *Options) Config() (*config.Config, error) {
 	}
 
 	return &config.Config{
-		KubeClient:       client,
-		CloudShellClient: cloudshellClient,
-		Client:           runtimeClient,
-		Kubeconfig:       kubeconfig,
-		EventRecorder:    eventRecorder,
-		CoreWorkerLimit:  o.CoreWorkerLimit,
-		MaxWorkerLimit:   o.MaxWorkerLimit,
-		CloudShellImage:  o.ClouShellImage,
-		NodeSelector:     o.NodeSelector,
-		Resources:        &o.Resources,
+		KubeClient:            client,
+		CloudShellClient:      cloudshellClient,
+		Client:                runtimeClient,
+		Kubeconfig:            kubeconfig,
+		EventRecorder:         eventRecorder,
+		CloudShellConcurrency: o.cloudShellConcurrency,
+		CoreWorkerLimit:       o.CoreWorkerLimit,
+		MaxWorkerLimit:        o.MaxWorkerLimit,
+		CloudShellImage:       o.ClouShellImage,
+		NodeSelector:          o.NodeSelector,
+		Resources:             &o.Resources,
+		IgnoreSpecUpdate:      o.IgnoreSpecUpdate,
 
 		LeaderElection: o.LeaderElection,
 	}, nil

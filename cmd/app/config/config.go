@@ -11,16 +11,18 @@ import (
 )
 
 type Config struct {
-	KubeClient       *clientset.Clientset
-	CloudShellClient *versioned.Clientset
-	Client           client.Client
-	Kubeconfig       *rest.Config
-	EventRecorder    record.EventRecorder
-	CoreWorkerLimit  int
-	MaxWorkerLimit   int
-	CloudShellImage  string
-	NodeSelector     map[string]string
-	Resources        *cloudshellv1alpha1.ResourceSetting
+	KubeClient            *clientset.Clientset
+	CloudShellClient      *versioned.Clientset
+	Client                client.Client
+	Kubeconfig            *rest.Config
+	EventRecorder         record.EventRecorder
+	CloudShellConcurrency int
+	CoreWorkerLimit       int
+	MaxWorkerLimit        int
+	CloudShellImage       string
+	NodeSelector          map[string]string
+	Resources             *cloudshellv1alpha1.ResourceSetting
+	IgnoreSpecUpdate      bool
 
 	LeaderElection componentbaseconfig.LeaderElectionConfiguration
 }

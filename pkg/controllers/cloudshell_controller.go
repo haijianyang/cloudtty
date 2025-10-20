@@ -87,11 +87,13 @@ type Controller struct {
 	cloudshellImage string
 	nodeSelector    map[string]string
 	resources       *cloudshellv1alpha1.ResourceSetting
+
+	ignoreSpecUpdate bool
 }
 
 func New(client client.Client, kubeClient kubernetes.Interface, config *rest.Config, wp *worerkpool.WorkerPool, cloudshellImage string,
 	nodeSelector map[string]string, resources *cloudshellv1alpha1.ResourceSetting,
-	cloudshellInformer cloudshellinformers.CloudShellInformer, podInformer informercorev1.PodInformer,
+	cloudshellInformer cloudshellinformers.CloudShellInformer, podInformer informercorev1.PodInformer, ignoreSpecUpdate bool,
 ) *Controller {
 	controller := &Controller{
 		Client:     client,
@@ -110,6 +112,8 @@ func New(client client.Client, kubeClient kubernetes.Interface, config *rest.Con
 		cloudshellImage:    cloudshellImage,
 		nodeSelector:       nodeSelector,
 		resources:          resources,
+
+		ignoreSpecUpdate: ignoreSpecUpdate,
 	}
 
 	_, err := cloudshellInformer.Informer().AddEventHandler(
@@ -120,7 +124,9 @@ func New(client client.Client, kubeClient kubernetes.Interface, config *rest.Con
 			UpdateFunc: func(oldObj, newObj interface{}) {
 				older := oldObj.(*cloudshellv1alpha1.CloudShell)
 				newer := newObj.(*cloudshellv1alpha1.CloudShell)
-				if !reflect.DeepEqual(older.Spec, newer.Spec) || !newer.DeletionTimestamp.IsZero() {
+				olderSpec := older.Spec
+				newerSpec := newer.Spec
+				if !reflect.DeepEqual(olderSpec, newerSpec) || !newer.DeletionTimestamp.IsZero() {
 					controller.enqueue(newObj)
 				}
 			},
@@ -268,6 +274,7 @@ func (c *Controller) syncCloudShell(ctx context.Context, cloudshell *cloudshellv
 
 	// TODO: when cloudshell image be changed, the image of binding worker is different with the spce.image
 
+	isNewWorker := false
 	if worker == nil {
 		nodeSelectorString, err := util.MapToJSONString(c.nodeSelector)
 		if err != nil {
@@ -293,6 +300,7 @@ func (c *Controller) syncCloudShell(ctx context.Context, cloudshell *cloudshellv
 			return nil, err
 		}
 
+		isNewWorker = true
 		AddLabel(cloudshell, constants.CloudshellPodLabelKey, worker.Name)
 		if err := c.Update(context.TODO(), cloudshell); err != nil {
 			return nil, err
@@ -305,9 +313,15 @@ func (c *Controller) syncCloudShell(ctx context.Context, cloudshell *cloudshellv
 		return nil, err
 	}
 
-	if err = c.StartupWorkerFor(ctx, cloudshell); err != nil {
-		klog.ErrorS(err, "failed to start pod for cloudshell", "cloudshell", klog.KObj(cloudshell))
-		return nil, err
+	// https://github.com/cloudtty/cloudtty/issues/535
+	// https://github.com/cloudtty/cloudtty/issues/638
+	if isNewWorker || cloudshell.Status.LastScheduleTime == nil || !c.ignoreSpecUpdate {
+		if err = c.StartupWorkerFor(ctx, cloudshell); err != nil {
+			klog.ErrorS(err, "failed to start pod for cloudshell", "cloudshell", klog.KObj(cloudshell))
+			return nil, err
+		}
+	} else {
+		klog.V(3).Info("Skip startup worker for cloudshell", "cloudshell", klog.KObj(cloudshell))
 	}
 
 	// url add ttl param, if ttl was set
@@ -839,10 +853,19 @@ func (c *Controller) removeCloudshell(ctx context.Context, cloudshell *cloudshel
 	}
 
 	if worker != nil {
-		if err = c.ResetWorker(ctx, cloudshell); err != nil {
-			klog.ErrorS(err, "Failed to reset worker", "cloudshell", cloudshell.Name)
+		toDelete := false
+		// https://github.com/cloudtty/cloudtty/issues/482
+		if cloudshell.Annotations != nil &&
+			cloudshell.Annotations[constants.DeleteWorkerOnDeletionAnnotation] == "true" {
+			toDelete = true
+			klog.Infof("cloudshell %s has %s, so delete worker %s", cloudshell.Name, constants.DeleteWorkerOnDeletionAnnotation, worker.Name)
+		} else {
+			if err = c.ResetWorker(ctx, cloudshell); err != nil {
+				klog.ErrorS(err, "Failed to reset worker", "cloudshell", cloudshell.Name)
+			}
 		}
-		if err := c.workerPool.Back(worker); err != nil {
+
+		if err := c.workerPool.Back(worker, toDelete); err != nil {
 			klog.ErrorS(err, "Failed to back worker", "cloudshell", cloudshell.Name)
 			return err
 		}

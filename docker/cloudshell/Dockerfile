@@ -9,14 +9,17 @@ RUN yarn install
 COPY html/ /app/
 RUN yarn run build
 
-FROM ghcr.io/dtzar/helm-kubectl:3.17.0
+FROM docker.io/smartelf/helm-kubectl:1.30.14
 SHELL [ "/bin/bash", "-c" ]
 
+ARG TARGETARCH
 ARG TTYD_VERSION=1.7.8
+ARG KUBECOLOR_VERSION=0.5.2
+ARG KUSTOMIZE_VERSION=5.7.1
 
 RUN echo "https://mirrors.aliyun.com/alpine/v3.20/main/" >> /etc/apk/repositories \
     && apk update \
-    && apk add wget gcc g++ make bind-tools \
+    && apk add wget gcc g++ make bind-tools vim \
     && apk upgrade libexpat \
     && wget https://ohse.de/uwe/releases/lrzsz-0.12.20.tar.gz \
     && tar -xf lrzsz-0.12.20.tar.gz \
@@ -31,7 +34,23 @@ RUN echo "https://mirrors.aliyun.com/alpine/v3.20/main/" >> /etc/apk/repositorie
     && source /usr/share/bash-completion/bash_completion \
     && echo 'source <(kubectl completion bash)' >>~/.bashrc \
     && echo 'alias k=kubectl' >>~/.bashrc \
-    && echo 'complete -o default -F __start_kubectl k' >>~/.bashrc
+    && echo 'alias kubectl=kubecolor' >> ~/.bashrc \
+    && echo 'complete -o default -F __start_kubectl kubecolor' >> ~/.bashrc \
+    && echo 'complete -o default -F __start_kubectl k' >> ~/.bashrc \
+    && source ~/.bashrc
+
+RUN wget https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_${TARGETARCH}.tar.gz \
+    && tar -xvf kustomize_v${KUSTOMIZE_VERSION}_linux_${TARGETARCH}.tar.gz \
+    && mv kustomize /usr/local/bin/kustomize \
+    && chmod +x /usr/local/bin/kustomize \
+    && kustomize version
+
+RUN curl -LO https://github.com/kvaps/kubectl-node-shell/raw/master/kubectl-node_shell \
+    && chmod +x ./kubectl-node_shell \
+    && mv ./kubectl-node_shell /usr/local/bin/kubectl-node_shell
+
+RUN wget https://github.com/kubecolor/kubecolor/releases/download/v${KUBECOLOR_VERSION}/kubecolor_${KUBECOLOR_VERSION}_linux_${TARGETARCH}.tar.gz \
+    && tar xf kubecolor_${KUBECOLOR_VERSION}_linux_${TARGETARCH}.tar.gz -C /usr/local/bin/ kubecolor
 
 # https://github.com/flpanbin/ttyd/releases/download/1.7.8/ttyd.i686
 RUN ttydArch="$(uname -m)" && echo "Building arch of $ttydArch.." \
